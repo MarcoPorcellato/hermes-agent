@@ -1406,6 +1406,12 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             provider=agent.provider,
             api_mode=agent.api_mode,
         )
+        if getattr(agent, "edge_mode", False):
+            agent.context_compressor._compression_threshold_scale = getattr(
+                agent, "_edge_context_flush_ratio", 0.82
+            )
+        else:
+            agent.context_compressor._compression_threshold_scale = 1.0
 
     # ── Invalidate cached system prompt so it rebuilds next turn ──
     agent._cached_system_prompt = None
@@ -1486,9 +1492,27 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     if block_message is not None:
         return json.dumps({"error": block_message}, ensure_ascii=False)
 
+    if getattr(agent, "edge_mode", False):
+        try:
+            from agent.edge_fault_damper import (
+                edge_precheck_tool_repeat,
+                edge_record_tool_result_for_damper,
+            )
+
+            _edge_msg = edge_precheck_tool_repeat(agent, function_name, function_args)
+            if _edge_msg:
+                return json.dumps(
+                    {"error": _edge_msg, "edge_fault_damper": True},
+                    ensure_ascii=False,
+                )
+        except Exception as _edge_exc:
+            logger = logging.getLogger(__name__)
+            logger.debug("edge_precheck_tool_repeat: %s", _edge_exc)
+
+    result: str
     if function_name == "todo":
         from tools.todo_tool import todo_tool as _todo_tool
-        return _todo_tool(
+        result = _todo_tool(
             todos=function_args.get("todos"),
             merge=function_args.get("merge", False),
             store=agent._todo_store,
@@ -1497,15 +1521,16 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         session_db = agent._get_session_db_for_recall()
         if not session_db:
             from hermes_state import format_session_db_unavailable
-            return json.dumps({"success": False, "error": format_session_db_unavailable()})
-        from tools.session_search_tool import session_search as _session_search
-        return _session_search(
-            query=function_args.get("query", ""),
-            role_filter=function_args.get("role_filter"),
-            limit=function_args.get("limit", 3),
-            db=session_db,
-            current_session_id=agent.session_id,
-        )
+            result = json.dumps({"success": False, "error": format_session_db_unavailable()})
+        else:
+            from tools.session_search_tool import session_search as _session_search
+            result = _session_search(
+                query=function_args.get("query", ""),
+                role_filter=function_args.get("role_filter"),
+                limit=function_args.get("limit", 3),
+                db=session_db,
+                current_session_id=agent.session_id,
+            )
     elif function_name == "memory":
         target = function_args.get("target", "memory")
         from tools.memory_tool import memory_tool as _memory_tool
@@ -1530,26 +1555,37 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 )
             except Exception:
                 pass
-        return result
     elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
-        return agent._memory_manager.handle_tool_call(function_name, function_args)
+        result = agent._memory_manager.handle_tool_call(function_name, function_args)
     elif function_name == "clarify":
         from tools.clarify_tool import clarify_tool as _clarify_tool
-        return _clarify_tool(
+        result = _clarify_tool(
             question=function_args.get("question", ""),
             choices=function_args.get("choices"),
             callback=agent.clarify_callback,
         )
     elif function_name == "delegate_task":
-        return agent._dispatch_delegate_task(function_args)
+        result = agent._dispatch_delegate_task(function_args)
     else:
-        return _ra().handle_function_call(
+        result = _ra().handle_function_call(
             function_name, function_args, effective_task_id,
             tool_call_id=tool_call_id,
             session_id=agent.session_id or "",
             enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
             skip_pre_tool_call_hook=True,
         )
+
+    if getattr(agent, "edge_mode", False):
+        try:
+            from agent.edge_fault_damper import edge_record_tool_result_for_damper
+
+            edge_record_tool_result_for_damper(
+                agent, function_name, function_args, result,
+            )
+        except Exception as _edge_exc:
+            logging.getLogger(__name__).debug("edge_record_tool_result: %s", _edge_exc)
+
+    return result
 
 
 

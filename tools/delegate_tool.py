@@ -1142,6 +1142,18 @@ def _build_child_agent(
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
 
+    if getattr(parent_agent, "edge_mode", False):
+        child._edge_scratchpad = getattr(parent_agent, "_edge_scratchpad", "") or ""
+        child._edge_failed_signatures = {
+            str(x).lower() for x in (getattr(parent_agent, "_edge_failed_signatures", None) or set())
+        }
+        try:
+            from agent.edge_fault_damper import resync_edge_failed_signatures
+
+            resync_edge_failed_signatures(child)
+        except Exception:
+            pass
+
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
     child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)

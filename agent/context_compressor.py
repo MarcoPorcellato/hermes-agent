@@ -606,7 +606,15 @@ class ContextCompressor(ContextEngine):
         where each pass removes only 1-2 messages.
         """
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
-        if tokens < self.threshold_tokens:
+        eff_threshold = self.threshold_tokens
+        scale = getattr(self, "_compression_threshold_scale", 1.0)
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = 1.0
+        if eff_threshold > 0 and 0 < scale < 1.0:
+            eff_threshold = max(int(eff_threshold * scale), 1)
+        if tokens < eff_threshold:
             return False
         # Anti-thrashing: back off if recent compressions were ineffective
         if self._ineffective_compression_count >= 2:

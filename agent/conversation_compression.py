@@ -264,12 +264,33 @@ def compress_context(
     Returns:
         ``(compressed_messages, new_system_prompt)`` tuple.
     """
+    if getattr(agent, "edge_mode", False):
+        try:
+            from agent.edge_working_memory import EdgeCompressGuardError, validate_edge_compress_guard
+
+            validate_edge_compress_guard(agent, messages)
+        except EdgeCompressGuardError as exc:
+            logger.warning("edge compress guard — skipping compaction: %s", exc)
+            cached = getattr(agent, "_cached_system_prompt", None)
+            if cached:
+                return messages, cached
+            return messages, agent._build_system_prompt(system_message)
+
+    _compress_focus = focus_topic
+    if getattr(agent, "edge_mode", False):
+        from agent.edge_working_memory import merge_focus_topic_with_scratchpad
+
+        _compress_focus = merge_focus_topic_with_scratchpad(
+            focus_topic,
+            getattr(agent, "_edge_scratchpad", "") or "",
+        )
+
     _pre_msg_count = len(messages)
     logger.info(
         "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
         agent.session_id or "none", _pre_msg_count,
         f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
-        focus_topic,
+        _compress_focus,
     )
     agent._emit_status(
         "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
@@ -283,11 +304,32 @@ def compress_context(
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+        compressed = agent.context_compressor.compress(
+            messages, current_tokens=approx_tokens, focus_topic=_compress_focus
+        )
     except TypeError:
         # Plugin context engine with strict signature that doesn't accept
         # focus_topic — fall back to calling without it.
         compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+
+    if getattr(agent, "edge_mode", False):
+        from agent.edge_working_memory import (
+            append_compaction_delta_to_scratchpad,
+            extract_compression_summary_text,
+        )
+
+        _delta_summary = extract_compression_summary_text(compressed)
+        if _delta_summary:
+            agent._edge_scratchpad = append_compaction_delta_to_scratchpad(
+                getattr(agent, "_edge_scratchpad", "") or "",
+                _delta_summary,
+            )
+            try:
+                from agent.edge_working_memory import persist_edge_scratchpad_now
+
+                persist_edge_scratchpad_now(agent)
+            except Exception:
+                pass
 
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
     if summary_error:
@@ -357,6 +399,11 @@ def compress_context(
                 except (ValueError, Exception) as e:
                     logger.debug("Could not propagate title on compression: %s", e)
             agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
+            try:
+                _esp = getattr(agent, "_edge_scratchpad", "") or ""
+                agent._session_db.update_edge_working_memory(agent.session_id, _esp)
+            except Exception:
+                pass
             # Reset flush cursor — new session starts with no messages written
             agent._last_flushed_db_idx = 0
         except Exception as e:

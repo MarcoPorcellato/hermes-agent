@@ -552,6 +552,18 @@ DEFAULT_CONFIG = {
         # remains available as a tool regardless of this setting — the routing
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
+        # Edge / local-SLM mode: working-memory scratchpad injected into the
+        # user message (not the system prompt) and earlier context compaction.
+        "edge_mode": False,
+        # When edge_mode: trigger compaction at (ratio × compression threshold).
+        # Lower = flush earlier (more headroom for weak local models).
+        "edge_context_flush_ratio": 0.82,
+        # Mid-turn compression (edge only): 0 disables each trigger. Example
+        # local-SLM tuning: assistant rounds=8, token soft limit=3500.
+        "edge_flush_assistant_rounds": 0,
+        "edge_flush_token_soft_limit": 0,
+        # 0 = off. When >0, sets interrupt after N consecutive tool failures.
+        "edge_max_consecutive_tool_failures": 0,
         "disabled_toolsets": [],
     },
     

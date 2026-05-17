@@ -1053,6 +1053,35 @@ def init_agent(
         _agent_section = {}
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
 
+    # Local / edge SLM path — tighter context flushing + scratchpad injection
+    agent.edge_mode = bool(_agent_section.get("edge_mode", False))
+    agent._edge_scratchpad = ""
+    agent._edge_failed_signatures = set()
+    try:
+        _flush_ratio = float(_agent_section.get("edge_context_flush_ratio", 0.82))
+    except (TypeError, ValueError):
+        _flush_ratio = 0.82
+    agent._edge_context_flush_ratio = max(0.5, min(0.99, _flush_ratio))
+    try:
+        agent._edge_flush_assistant_rounds = int(
+            _agent_section.get("edge_flush_assistant_rounds", 0)
+        )
+    except (TypeError, ValueError):
+        agent._edge_flush_assistant_rounds = 0
+    try:
+        agent._edge_flush_token_soft_limit = int(
+            _agent_section.get("edge_flush_token_soft_limit", 0)
+        )
+    except (TypeError, ValueError):
+        agent._edge_flush_token_soft_limit = 0
+    try:
+        agent._edge_max_consecutive_tool_failures = int(
+            _agent_section.get("edge_max_consecutive_tool_failures", 0)
+        )
+    except (TypeError, ValueError):
+        agent._edge_max_consecutive_tool_failures = 0
+    agent._edge_consecutive_tool_failures = 0
+
     # App-level API retry count (wraps each model API call).  Default 3,
     # overridable via agent.api_max_retries in config.yaml.  See #11616.
     try:
@@ -1305,6 +1334,12 @@ def init_agent(
             api_mode=agent.api_mode,
         )
     agent.compression_enabled = compression_enabled
+
+    # Soften compaction trigger for edge mode (same anti-thrashing logic).
+    if getattr(agent, "edge_mode", False):
+        agent.context_compressor._compression_threshold_scale = agent._edge_context_flush_ratio
+    else:
+        agent.context_compressor._compression_threshold_scale = 1.0
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).
